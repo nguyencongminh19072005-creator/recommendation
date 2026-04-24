@@ -87,7 +87,6 @@ class UserBasedCF:
                 else:
                     sim = numerator / denominator
 
-                # 🔥 shrink (giữ lại)
                 shrink = n_common / (n_common + 10)
                 sim = sim * shrink
 
@@ -112,7 +111,6 @@ class UserBasedCF:
         top_users = users_rated_i[top_k_idx]
         top_sims = sims[top_k_idx]
 
-        # 🔥 chỉ bỏ similarity âm
         top_sims = np.maximum(top_sims, 0)
 
         top_normalized_ratings = []
