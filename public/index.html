@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Movie Recommendation System</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+  <!-- Header -->
+  <header class="bg-gray-900 border-b border-gray-800 px-6 py-4">
+    <h1 class="text-2xl font-bold text-indigo-400">🎬 Movie Recommendation System</h1>
+    <p class="text-gray-400 text-sm">Collaborative Filtering — ML-100K</p>
+  </header>
+
+  <!-- Form -->
+  <main class="max-w-5xl mx-auto px-6 py-8">
+    <form action="/recommend" method="get"
+          class="bg-gray-900 rounded-xl p-6 flex flex-wrap gap-4 items-end border border-gray-800">
+
+      <div class="flex flex-col gap-1">
+        <!-- 🔥 sửa label -->
+        <label class="text-sm text-gray-400">User ID (có thể nhập bất kỳ)</label>
+
+        <!-- 🔥 FIX: bỏ max -->
+        <input type="number" name="user_id" min="0"
+               value="{{ user_id if user_id is defined else 0 }}"
+               class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 w-36
+                      focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
+      </div>
+
+      <div class="flex flex-col gap-1">
+        <label class="text-sm text-gray-400">Số lượng gợi ý</label>
+        <input type="number" name="n" min="1" max="20"
+               value="{{ n if n is defined else 10 }}"
+               class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 w-28
+                      focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
+      </div>
+
+      <div class="flex flex-col gap-1">
+        <label class="text-sm text-gray-400">Phương pháp</label>
+        <select name="method"
+                class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2
+                       focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <option value="both"  {% if method is defined and method == 'both'  %}selected{% endif %}>So sánh cả 2</option>
+          <option value="user"  {% if method is defined and method == 'user'  %}selected{% endif %}>User-Based CF</option>
+          <option value="item"  {% if method is defined and method == 'item'  %}selected{% endif %}>Item-Based CF</option>
+        </select>
+      </div>
+
+      <button type="submit"
+              class="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold
+                     px-6 py-2 rounded-lg transition">
+        🔍 Gợi ý
+      </button>
+    </form>
+
+    <!-- Results -->
+    {% if user_recs is defined or item_recs is defined %}
+    <div class="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+
+      <!-- User History -->
+      <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+        <h2 class="text-lg font-semibold text-yellow-400 mb-3">
+          📋 Lịch sử rating — User {{ user_id }}
+        </h2>
+        {% if history %}
+          <div class="space-y-3">
+          {% for h in history %}
+            <div class="flex gap-3 items-center">
+              {% if h.poster %}
+                <img src="{{ h.poster }}" class="w-10 h-14 object-cover rounded shrink-0"/>
+              {% else %}
+                <div class="w-10 h-14 bg-gray-700 rounded shrink-0 flex items-center justify-center text-xs text-gray-500">?</div>
+              {% endif %}
+              <div class="flex-1 min-w-0">
+                <p class="text-sm text-gray-300 truncate">{{ h.title }}</p>
+                <p class="text-yellow-400 text-xs font-bold">{{ h.rating }}⭐</p>
+              </div>
+            </div>
+          {% endfor %}
+          </div>
+        {% else %}
+          <p class="text-gray-500 text-sm">Không có dữ liệu</p>
+        {% endif %}
+      </div>
+
+      <!-- User-Based CF -->
+      {% if method in ['user', 'both'] %}
+      <div class="bg-gray-900 rounded-xl border border-indigo-800 p-5">
+        <h2 class="text-lg font-semibold text-indigo-400 mb-1">👥 User-Based CF</h2>
+        {% if user_cold %}
+          <p class="text-xs text-orange-400 mb-3">⚠️ Cold start — hiển thị phim phổ biến nhất</p>
+        {% else %}
+          <p class="text-xs text-gray-500 mb-3">Gợi ý dựa trên users tương đồng</p>
+        {% endif %}
+        {% if user_recs %}
+          <div class="space-y-3">
+          {% for rec in user_recs %}
+            <div class="flex gap-3 items-center">
+              {% if rec.poster %}
+                <img src="{{ rec.poster }}" class="w-10 h-14 object-cover rounded shrink-0"/>
+              {% else %}
+                <div class="w-10 h-14 bg-gray-700 rounded shrink-0 flex items-center justify-center text-xs text-gray-500">?</div>
+              {% endif %}
+              <div class="flex-1 min-w-0">
+                <p class="text-sm text-gray-300 truncate">{{ rec.title }}</p>
+                <p class="text-indigo-400 text-xs font-bold">{{ rec.score }}⭐</p>
+              </div>
+            </div>
+          {% endfor %}
+          </div>
+        {% else %}
+          <p class="text-gray-500 text-sm">Không có gợi ý</p>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Item-Based CF -->
+      {% if method in ['item', 'both'] %}
+      <div class="bg-gray-900 rounded-xl border border-green-800 p-5">
+        <h2 class="text-lg font-semibold text-green-400 mb-1">🎬 Item-Based CF</h2>
+        {% if item_cold %}
+          <p class="text-xs text-orange-400 mb-3">⚠️ Cold start — hiển thị phim phổ biến nhất</p>
+        {% else %}
+          <p class="text-xs text-gray-500 mb-3">Gợi ý dựa trên items tương đồng</p>
+        {% endif %}
+        {% if item_recs %}
+          <div class="space-y-3">
+          {% for rec in item_recs %}
+            <div class="flex gap-3 items-center">
+              {% if rec.poster %}
+                <img src="{{ rec.poster }}" class="w-10 h-14 object-cover rounded shrink-0"/>
+              {% else %}
+                <div class="w-10 h-14 bg-gray-700 rounded shrink-0 flex items-center justify-center text-xs text-gray-500">?</div>
+              {% endif %}
+              <div class="flex-1 min-w-0">
+                <p class="text-sm text-gray-300 truncate">{{ rec.title }}</p>
+                {% if rec.score %}
+                  <p class="text-green-400 text-xs font-bold">{{ rec.score }}⭐</p>
+                {% endif %}
+              </div>
+            </div>
+          {% endfor %}
+          </div>
+        {% else %}
+          <p class="text-gray-500 text-sm">Không có gợi ý</p>
+        {% endif %}
+      </div>
+      {% endif %}
+
+    </div>
+    {% endif %}
+  </main>
+</body>
+</html>
