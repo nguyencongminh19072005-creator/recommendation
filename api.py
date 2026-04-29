@@ -7,14 +7,12 @@ API_KEY = "c7ad753849b35c83be5394a646f70425"
 BASE_URL = "https://api.themoviedb.org/3"
 IMG_BASE = "https://image.tmdb.org/t/p/w300"
 
-# Đọc tên phim từ u.item
 movies = {}
 with open("dataset/ml-100k (1)/ml-100k/u.item", encoding="latin-1") as f:
     for line in f:
         parts = line.strip().split("|")
         movie_id = int(parts[0])
-        title_year = parts[1]  # vd: "Toy Story (1995)"
-        # Tách tên và năm
+        title_year = parts[1]  
         if "(" in title_year:
             title = title_year[:title_year.rfind("(")].strip()
             year  = title_year[title_year.rfind("(")+1:title_year.rfind(")")]
@@ -23,7 +21,7 @@ with open("dataset/ml-100k (1)/ml-100k/u.item", encoding="latin-1") as f:
             year  = ""
         movies[movie_id] = {"title": title_year, "search": title, "year": year}
 
-# Fetch poster từ TMDB
+
 posters = {}
 for movie_id, info in movies.items():
     try:

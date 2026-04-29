@@ -1,8 +1,9 @@
 import pandas as pd
 import numpy as np
-import pickle
+import matplotlib.pyplot as plt
+
 class UserBasedCF:
-    def __init__(self, Y_data, n_users, n_items, k=20, shrink=20, min_common=2):
+    def __init__(self, Y_data, n_users, n_items, k=20, shrink=20, min_common=15):
         self.Y_data = Y_data
         self.k = k
         self.n_users = n_users
@@ -167,9 +168,9 @@ def split_data(Y, train_ratio=0.7, valid_ratio=0.1):
         n_valid = int(valid_ratio * n)
         for i, r in items[:n_train]:
             train.append([u, i, r])
-        for i, r in items[n_train:n_train+n_valid]:
+        for i, r in items[n_train:n_train + n_valid]:
             valid.append([u, i, r])
-        for i, r in items[n_train+n_valid:]:
+        for i, r in items[n_train + n_valid:]:
             test.append([u, i, r])
 
     return np.array(train), np.array(valid), np.array(test)
@@ -234,7 +235,7 @@ def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=300):
 # ================= MAIN =================
 if __name__ == "__main__":
     df = pd.read_csv('dataset/ml-100k (1)/ml-100k/u.data',
-                    sep='\t', names=['u','i','r','t'])
+                     sep='\t', names=['u', 'i', 'r', 't'])
     df = df.drop('t', axis=1)
     df['u'] -= 1
     df['i'] -= 1
@@ -245,12 +246,13 @@ if __name__ == "__main__":
 
     Y_train, Y_valid, Y_test = split_data(Y)
 
-    # ===== TUNING =====
+    # ===== CHỌN HYPERPARAMETER TRÊN VALID =====
     best_val_p = 0
     best_params = {}
+    best_model = None
 
-    for k in [20, 30, 50]:
-        for shrink in [5, 10, 20]:
+    for k in [10,15,20]:
+        for shrink in [50,70,100,200,300]:
             model = UserBasedCF(Y_train, n_users, n_items, k=k, shrink=shrink)
             model.fit()
             p, r = evaluate_top_k(model, Y_valid, n_items, K=10)
@@ -259,22 +261,52 @@ if __name__ == "__main__":
                 best_val_p = p
                 best_params = {'k': k, 'shrink': shrink}
                 best_model = model
+            print(f"k={k}, shrink={shrink} -> Precision={p:.4f}, Recall={r:.4f}")
 
-    print(f"Best params: {best_params}")
+    print(f"\nBest params: {best_params}")
 
-    # ===== TEST =====
+    # ===== ĐÁNH GIÁ TRÊN TEST =====
     print(f"RMSE Test: {rmse(best_model, Y_test):.4f}")
 
-    # ===== FINAL MODEL =====
-    final_model = UserBasedCF(Y, n_users, n_items,
-                            k=best_params['k'],
-                            shrink=best_params['shrink'])
-    final_model.fit()
+    p_test, r_test = evaluate_top_k(best_model, Y_test, n_items, K=10)
+    print(f"Test Precision@10: {p_test:.4f}")
+    print(f"Test Recall@10: {r_test:.4f}")
 
+    # ===== TRAIN FINAL MODEL TRÊN TOÀN BỘ DATA =====
+    final_model = UserBasedCF(Y, n_users, n_items,
+                              k=best_params['k'],
+                              shrink=best_params['shrink'])
+    final_model.fit()
     print("Train final model xong")
 
-    # ===== LƯU MODEL =====
-    with open("usercf_model.pkl", "wb") as f:
-        pickle.dump(final_model, f)
+    # ===== LEARNING CURVE =====
+    print("\nĐang vẽ learning curve...")
+    train_sizes = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
+    train_rmses, test_rmses = [], []
 
-    print("Đã lưu model vào file usercf_model.pkl")
+    for frac in train_sizes:
+        n = int(len(Y_train) * frac)
+        Y_sub = Y_train[:n]
+
+        lc_model = UserBasedCF(Y_sub, n_users, n_items,
+                               k=best_params['k'], shrink=best_params['shrink'])
+        lc_model.fit()
+
+        tr = rmse(lc_model, Y_sub)
+        te = rmse(lc_model, Y_test)
+        train_rmses.append(tr)
+        test_rmses.append(te)
+        print(f"  Size {frac*100:.0f}%: Train RMSE={tr:.4f}, Test RMSE={te:.4f}")
+
+    size_labels = [f"{int(s*100)}%" for s in train_sizes]
+    plt.figure(figsize=(8, 5))
+    plt.plot(size_labels, train_rmses, 'o-', label='Train RMSE')
+    plt.plot(size_labels, test_rmses, 'o--', label='Test RMSE')
+    plt.xlabel('Training data size')
+    plt.ylabel('RMSE')
+    plt.title('Learning Curve')
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('learning_curve.png', dpi=150)
+    plt.show()

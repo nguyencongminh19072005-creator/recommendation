@@ -85,19 +85,17 @@ def get_user_recommendations(user_id: int, n: int = 10):
 def get_item_recommendations(user_id: int, n: int = 10):
     user_id_1based = user_id + 1
 
-    # 🔥 FIX 1: check ngoài range
-    if user_id_1based >= item_model.n_users or user_id_1based <= 0:
+    # Fix: dùng max từ data thực tế
+    max_user_in_data = int(item_model.Y_data[:, 0].max())
+    if user_id_1based > max_user_in_data or user_id_1based <= 0:
         return get_popular_items(n), True
 
     ids = np.where(item_model.Y_data[:, 0] == user_id_1based)[0]
-
-    # 🔥 FIX 2: user chưa có rating
     if len(ids) == 0:
         return get_popular_items(n), True
 
     recs = item_model.recommend(user_id_1based)[:n]
 
-    # 🔥 FIX 3: nếu model trả rỗng → fallback
     if not recs:
         return get_popular_items(n), True
 
