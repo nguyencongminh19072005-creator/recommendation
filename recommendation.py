@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import pickle
 from google.colab import drive
 
+
 class UserBasedCF:
     def __init__(self, Y_data, n_users, n_items, k=20, shrink=20, min_common=15):
         self.Y_data = Y_data
@@ -94,13 +95,10 @@ class UserBasedCF:
             return None
 
         users_rated_i = self.Y_data[item_indices, 0].astype(int)
-        
-        # 🟢 FIX LỖI LEAKAGE DỮ LIỆU Ở ĐÂY:
-        # Loại bỏ chính user `u` ra khỏi danh sách những người đã đánh giá phim `i`
         users_rated_i = users_rated_i[users_rated_i != u]
-        
+
         if len(users_rated_i) == 0:
-            return self.mu[u] # Nếu không có ai khác đánh giá, trả về mức trung bình của user
+            return self.mu[u]
 
         sims = self.S[u, users_rated_i]
 
@@ -117,7 +115,7 @@ class UserBasedCF:
         ratings = np.array(ratings)
         denom   = np.sum(np.abs(top_sims))
         if denom == 0:
-            return self.mu[u] # Fallback về trung bình nếu tổng độ tương đồng = 0
+            return self.mu[u]
 
         pred = self.mu[u] + np.sum(top_sims * ratings) / denom
         return np.clip(pred, 1, 5)
@@ -128,10 +126,8 @@ class UserBasedCF:
             return None
 
         users_rated_i = self.Y_data[item_indices, 0].astype(int)
-        
-        # 🟢 FIX LỖI LEAKAGE DỮ LIỆU Ở ĐÂY:
         users_rated_i = users_rated_i[users_rated_i != u]
-        
+
         if len(users_rated_i) == 0:
             return self.mu[u]
 
@@ -155,6 +151,11 @@ class UserBasedCF:
         return self.mu[u] + np.sum(top_sims * ratings) / denom
 
     def recommend(self, u, n_rec=5):
+        # Cold-start: user mới chưa có trong hệ thống
+        if u >= self.n_users:
+            print(f"  [Cold-start] User {u} chưa có rating → fallback sang popularity-based")
+            return [(i, None) for i in top_popular(self.Y_data, n_rec)]
+
         items_u, _ = self.get_sparse_row(u)
         all_items  = np.arange(self.n_items)
         unrated    = np.setdiff1d(all_items, items_u)
@@ -165,28 +166,46 @@ class UserBasedCF:
             if p is not None:
                 preds.append((i, p))
 
+        # Cold-start: phim mới hoặc không có dự đoán
+        if len(preds) == 0:
+            print(f"  [Cold-start] Không có dự đoán cho user {u} → fallback sang popularity-based")
+            return [(i, None) for i in top_popular(self.Y_data, n_rec)]
+
         preds.sort(key=lambda x: x[1], reverse=True)
         return preds[:n_rec]
 
 
+# ========== HELPER FUNCTIONS ==========
+
+def top_popular(Y_data, top_n=5):
+    """Trả về top phim phổ biến nhất dựa trên điểm trung bình có trọng số."""
+    df = pd.DataFrame(Y_data, columns=["u", "i", "r"])
+    avg   = df.groupby("i")["r"].mean()
+    cnt   = df.groupby("i")["r"].count()
+    score = avg * np.log1p(cnt)  # tránh phim ít vote nhưng điểm cao
+    top_items = score.sort_values(ascending=False).index.tolist()
+    return top_items[:top_n]
+
+
 def split_data(Y, train_ratio=0.7, valid_ratio=0.1):
-    np.random.seed(42)
+    """Chia dữ liệu theo per-user + timestamp.
+    Mỗi user luôn có dữ liệu trong train, thứ tự thời gian được giữ nguyên.
+    """
     user_items = {}
-    for u, i, r in Y:
-        user_items.setdefault(int(u), []).append((i, r))
+    for u, i, r, t in Y:
+        user_items.setdefault(int(u), []).append((i, r, t))
 
     train, valid, test = [], [], []
     for u in user_items:
-        items = user_items[u]
-        np.random.shuffle(items)
-        n = len(items)
+        items = sorted(user_items[u], key=lambda x: x[2])  # sort theo timestamp
+        n       = len(items)
         n_train = int(train_ratio * n)
         n_valid = int(valid_ratio * n)
-        for i, r in items[:n_train]:
+        for i, r, _ in items[:n_train]:
             train.append([u, i, r])
-        for i, r in items[n_train:n_train + n_valid]:
+        for i, r, _ in items[n_train:n_train + n_valid]:
             valid.append([u, i, r])
-        for i, r in items[n_train + n_valid:]:
+        for i, r, _ in items[n_train + n_valid:]:
             test.append([u, i, r])
 
     return np.array(train), np.array(valid), np.array(test)
@@ -203,7 +222,7 @@ def rmse(model, data):
     return np.sqrt(se / cnt) if cnt > 0 else float('nan')
 
 
-def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=300):
+def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=100):
     np.random.seed(42)
     user_liked = {}
     for u, i, r in data:
@@ -248,68 +267,64 @@ def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=300):
     return np.mean(precisions), np.mean(recalls)
 
 
+# ========== MAIN ==========
+
 if __name__ == "__main__":
     drive.mount('/content/drive')
     BASE_PATH = '/content/drive/MyDrive/movielen/'
 
     df = pd.read_csv(BASE_PATH + 'ml-100k (1)/ml-100k/u.data',
                      sep='\t', names=['u', 'i', 'r', 't'])
-    df = df.drop('t', axis=1)
     df['u'] -= 1
     df['i'] -= 1
-    Y = df.values
+    Y = df.values  # 4 cột: u, i, r, t
 
     n_users = int(np.max(Y[:, 0])) + 1
     n_items = int(np.max(Y[:, 1])) + 1
 
+    # Chia theo timestamp
     Y_train, Y_valid, Y_test = split_data(Y)
 
-    # ===== TUNING — chọn best params theo VALID RMSE thấp nhất =====
+    # ===== TUNING =====
     best_precision = -1
-    best_params = {}
-    best_model = None
+    best_params    = {}
+    best_model     = None
 
-    # 🟢 ĐIỀU CHỈNH: Tăng giới hạn K láng giềng lên để phù hợp với 100k data
-    for k in [40, 60, 80]:
-        for shrink in [10, 20, 30]:
-            for min_common in [5, 10]:
+    for k in [10,15,20]:
+        for shrink in [5,10,20]:
+            for min_common in [2,3,5]:
                 model = UserBasedCF(Y_train, n_users, n_items,
                                     k=k, shrink=shrink, min_common=min_common)
                 model.fit()
 
-                # Dùng Precision thay vì RMSE
                 p_val, r_val = evaluate_top_k(model, Y_valid, n_items, K=10)
 
                 if not np.isnan(p_val) and p_val > best_precision:
                     best_precision = p_val
-                    best_params = {
-                        'k': k,
-                        'shrink': shrink,
-                        'min_common': min_common
-                    }
-                    best_model = model
+                    best_params    = {'k': k, 'shrink': shrink, 'min_common': min_common}
+                    best_model     = model
 
                 print(f"k={k}, shrink={shrink}, min_common={min_common} "
                       f"-> P@10={p_val:.4f}, R@10={r_val:.4f}")
-    
-    print(f"\nBest params: {best_params}")
-    print(f"Best Precision@10: {best_precision:.4f}")
 
-    # ===== ĐÁNH GIÁ TRÊN TEST (1 lần duy nhất) =====
-    test_rmse = rmse(best_model, Y_test)
+    print(f"\nBest params    : {best_params}")
+    print(f"Best P@10 (val): {best_precision:.4f}")
+
+    # ===== ĐÁNH GIÁ TRÊN TEST =====
+    test_rmse      = rmse(best_model, Y_test)
     p_test, r_test = evaluate_top_k(best_model, Y_test, n_items, K=10)
-    print(f"Test RMSE : {test_rmse:.4f}")
+    print(f"\nTest RMSE : {test_rmse:.4f}")
     print(f"Test P@10 : {p_test:.4f}")
     print(f"Test R@10 : {r_test:.4f}")
 
-    # ===== LEARNING CURVE: Train RMSE vs Valid RMSE =====
+    # ===== LEARNING CURVE =====
     print("\nĐang vẽ learning curve...")
-    train_sizes = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
-    train_rmses = []
-    valid_rmses = []
-    valid_precisions = []
+    train_sizes       = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
+    train_rmses       = []
+    valid_rmses       = []
+    valid_precisions  = []
     np.random.seed(42)
-    
+
     for frac in train_sizes:
         n     = int(len(Y_train) * frac)
         idx   = np.random.choice(len(Y_train), n, replace=False)
@@ -318,17 +333,17 @@ if __name__ == "__main__":
         lc_model = UserBasedCF(Y_sub, n_users, n_items, **best_params)
         lc_model.fit()
 
-        tr = rmse(lc_model, Y_sub)
-        va = rmse(lc_model, Y_valid)
-        train_rmses.append(tr)
-        valid_rmses.append(va)
+        tr    = rmse(lc_model, Y_sub)
+        va    = rmse(lc_model, Y_valid)
         p_val, _ = evaluate_top_k(lc_model, Y_valid, n_items, K=10)
         p_val = 0 if np.isnan(p_val) else p_val
+
+        train_rmses.append(tr)
+        valid_rmses.append(va)
         valid_precisions.append(p_val)
-        print(f"Size {frac*100:.0f}%: "
-        f"Train={tr:.4f}, Valid={va:.4f}, "
-        f"P@10={p_val:.4f}, Gap={va-tr:.4f}")
-        
+        print(f"Size {frac*100:.0f}%: Train={tr:.4f}, Valid={va:.4f}, "
+              f"P@10={p_val:.4f}, Gap={va-tr:.4f}")
+
     # ===== VẼ BIỂU ĐỒ =====
     size_labels = [f"{int(s*100)}%" for s in train_sizes]
 
@@ -343,7 +358,7 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(BASE_PATH + 'learning_curve_user.png', dpi=150)
     plt.show()
-    
+
     plt.figure(figsize=(8, 5))
     plt.plot(size_labels, valid_precisions, 'o-', label='Valid Precision@10')
     plt.xlabel('Training data size')
@@ -354,11 +369,38 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(BASE_PATH + 'learning_curve_precision.png', dpi=150)
     plt.show()
-    
+
     # ===== FINAL MODEL =====
-    final_model = UserBasedCF(Y, n_users, n_items, **best_params)
+    final_model = UserBasedCF(Y[:, :3], n_users, n_items, **best_params)
     final_model.fit()
 
+    # ===== DEMO COLD-START =====
+    print("\n--- DEMO COLD-START ---")
+
+    # Case 1: user bình thường
+    print("\n[Case 1] User bình thường (user_id=0):")
+    recs = final_model.recommend(0, n_rec=5)
+    for item, score in recs:
+        print(f"  item={item}, score={score:.4f}" if score else f"  item={item}, score=popularity-based")
+
+    # Case 2: user mới
+    new_user_id = n_users
+    print(f"\n[Case 2] User mới (user_id={new_user_id}, chưa có rating):")
+    recs = final_model.recommend(new_user_id, n_rec=5)
+    for item, score in recs:
+        print(f"  item={item}, score=popularity-based")
+
+    # Case 3: phim mới
+    new_item_id  = n_items
+    n_items     += 1
+    print(f"\n[Case 3] Phim mới (item_id={new_item_id}, chưa có rating):")
+    print(f"  Phim {new_item_id} chưa có rating → predict trả None → không xuất hiện trong CF")
+    print(f"  Hệ thống fallback sang popularity-based:")
+    popular = top_popular(final_model.Y_data, top_n=5)
+    for item in popular:
+        print(f"  item={item}")
+
+    # ===== LƯU MODEL =====
     with open(BASE_PATH + "user_based_cf.pkl", "wb") as f:
         pickle.dump(final_model, f)
-    print(f"Saved model. Best params: {best_params}")
+    print(f"\nĐã lưu model. Best params: {best_params}")

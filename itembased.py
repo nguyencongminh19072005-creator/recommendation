@@ -8,144 +8,180 @@ from google.colab import drive
 
 
 class FastItemCF:
-    def __init__(self, Y_data, n_users, n_items, k=50, shrink=10, min_common=2, pop_weight=0.1):
-        self.Y_data = Y_data.astype(np.float64)
-        self.k = k
+    def __init__(self, Y_data, n_users, n_items, k=20, shrink=20, min_common=15, pop_weight=0.0):
+        self.Y_data = Y_data
         self.n_users = n_users
         self.n_items = n_items
+        self.k = k
         self.shrink = shrink
         self.min_common = min_common
         self.pop_weight = pop_weight
-
-    def normalize(self):
-        self.mu = np.zeros(self.n_users)
-        for u in range(self.n_users):
-            idx = self.Y_data[:, 0] == u
-            if np.any(idx):
-                self.mu[u] = np.mean(self.Y_data[idx, 2])
-
-        users   = self.Y_data[:, 0].astype(np.int32)
-        items   = self.Y_data[:, 1].astype(np.int32)
-        ratings = self.Y_data[:, 2].astype(np.float64)
-
-        item_counts = np.bincount(items, minlength=self.n_items)
-        self.item_pop      = np.log1p(item_counts)
-        self.item_pop_norm = self.item_pop / (np.max(self.item_pop) + 1e-8)
-
-        centered = ratings - self.mu[users]
-        self.Ybar = sparse.coo_matrix(
-            (centered, (users, items)),
-            shape=(self.n_users, self.n_items)
-        ).tocsr()
-
-    def similarity(self):
-        S = cosine_similarity(self.Ybar.T, dense_output=False).toarray()
-
-        binary      = self.Ybar.copy()
-        binary.data = np.ones_like(binary.data)
-        co_count    = (binary.T @ binary).toarray()
-
-        S = S * (co_count / (co_count + self.shrink))
-        S[co_count < self.min_common] = 0
-        S[S < 0] = 0
-        np.fill_diagonal(S, 0)
-        self.S = S
 
     def fit(self):
         self.normalize()
         self.similarity()
 
-    def get_sparse_row(self, u):
-        row = self.Ybar[u]
-        return row.indices, row.data
+    def normalize(self):
+        # Sort theo (item, user) → CSR by item nhất quán
+        sort_idx    = np.lexsort((self.Y_data[:, 0], self.Y_data[:, 1]))
+        self.Y_data = self.Y_data[sort_idx]
+
+        self.mu = np.zeros(self.n_users)
+        users   = self.Y_data[:, 0].astype(int)
+        for u in range(self.n_users):
+            ids = np.where(users == u)[0]
+            self.mu[u] = np.mean(self.Y_data[ids, 2]) if len(ids) > 0 else 0
+
+        rows    = self.Y_data[:, 1].astype(int)   # item là row
+        cols    = self.Y_data[:, 0].astype(int)   # user là col
+        ratings = self.Y_data[:, 2]
+        centered = ratings - self.mu[cols]
+
+        # Build CSR theo item
+        self.indptr   = np.zeros(self.n_items + 1, dtype=int)
+        for r in rows:
+            self.indptr[r + 1] += 1
+        self.indptr = np.cumsum(self.indptr)
+
+        self.indices  = np.zeros(len(cols), dtype=int)
+        self.csr_data = np.zeros(len(centered))
+
+        tracker = self.indptr[:-1].copy()
+        for idx in range(len(centered)):
+            r   = rows[idx]
+            pos = tracker[r]
+            self.indices[pos]  = cols[idx]
+            self.csr_data[pos] = centered[idx]
+            tracker[r] += 1
+
+        # item popularity (giữ nguyên)
+        item_counts        = np.bincount(rows, minlength=self.n_items)
+        self.item_pop      = np.log1p(item_counts)
+        self.item_pop_norm = self.item_pop / (np.max(self.item_pop) + 1e-8)
+
+    def get_sparse_row(self, i):
+        """Trả về (user_ids, ratings_bar) của item i."""
+        start = self.indptr[i]
+        end   = self.indptr[i + 1]
+        return self.indices[start:end], self.csr_data[start:end]
+
+    def get_user_items(self, u):
+        """Trả về (item_ids, ratings_bar) mà user u đã rate."""
+        mask  = self.Y_data[:, 0].astype(int) == u
+        items = self.Y_data[mask, 1].astype(int)
+        rbar  = self.Y_data[mask, 2] - self.mu[u]
+        return items, rbar
+
+    def similarity(self):
+        self.S = np.zeros((self.n_items, self.n_items))
+
+        for i in range(self.n_items):
+            users_i, ratings_i = self.get_sparse_row(i)
+            if len(users_i) == 0:
+                continue
+
+            for j in range(i, self.n_items):
+                if i == j:
+                    self.S[i, j] = 1.0
+                    continue
+
+                users_j, ratings_j = self.get_sparse_row(j)
+                if len(users_j) == 0:
+                    continue
+
+                common, idx_i, idx_j = np.intersect1d(
+                    users_i, users_j, return_indices=True
+                )
+                if len(common) < self.min_common:
+                    continue
+
+                r_i   = ratings_i[idx_i]
+                r_j   = ratings_j[idx_j]
+                denom = np.sqrt(np.sum(r_i**2)) * np.sqrt(np.sum(r_j**2))
+                if denom == 0:
+                    continue
+
+                sim  = np.sum(r_i * r_j) / denom
+                sim *= len(common) / (len(common) + self.shrink)
+                sim  = max(sim, 0)
+
+                self.S[i, j] = self.S[j, i] = sim
 
     def predict(self, u, i):
         if u >= self.n_users or i >= self.n_items:
             return None
-        item_indices = np.where(self.Y_data[:, 1] == i)[0]
-        if len(item_indices) == 0:
-            return None
-        items_u, _ = self.get_sparse_row(u)
+
+        items_u, rbar_u = self.get_user_items(u)
         if len(items_u) == 0:
             return None
 
-        sims      = self.S[i, items_u]
-        top_idx   = np.argsort(sims)[::-1][:self.k]
-        top_items = items_u[top_idx]
-        top_sims  = np.maximum(sims[top_idx], 0)
+        sims     = self.S[i, items_u]
+        top_idx  = np.argsort(sims)[::-1][:self.k]
+        top_sims = np.maximum(sims[top_idx], 0)
+        top_rbar = rbar_u[top_idx]
 
-        rated_vals = self.Ybar[u, top_items].toarray().flatten()
         denom = np.sum(np.abs(top_sims))
         if denom == 0:
             return None
 
-        pred = self.mu[u] + np.sum(top_sims * rated_vals) / denom
+        pred = self.mu[u] + np.sum(top_sims * top_rbar) / denom
         return float(np.clip(pred, 1, 5))
 
     def predict_score_for_ranking(self, u, i):
-        if u >= self.n_users or i >= self.n_items:
-            return None
-        items_u, _ = self.get_sparse_row(u)
+        items_u, rbar_u = self.get_user_items(u)
         if len(items_u) == 0:
             return None
 
-        sims      = self.S[i, items_u]
-        top_idx   = np.argsort(sims)[::-1][:self.k]
-        top_items = items_u[top_idx]
-        top_sims  = np.maximum(sims[top_idx], 0)
+        sims     = self.S[i, items_u]
+        top_idx  = np.argsort(sims)[::-1][:self.k]
+        top_sims = np.maximum(sims[top_idx], 0)
+        top_rbar = rbar_u[top_idx]
 
-        rated_vals = self.Ybar[u, top_items].toarray().flatten()
         denom = np.sum(np.abs(top_sims))
         if denom == 0:
             return None
 
         pop_bias = self.pop_weight * self.item_pop_norm[i]
-        return float(self.mu[u] + np.sum(top_sims * rated_vals) / denom + pop_bias)
+        return float(self.mu[u] + np.sum(top_sims * top_rbar) / denom + pop_bias)
 
     def recommend(self, u, n_rec=5):
-        items_u, _ = self.get_sparse_row(u)
-        all_items  = np.arange(self.n_items)
-        unrated    = np.setdiff1d(all_items, items_u)
+        if u >= self.n_users:
+            top_idx = np.argsort(self.item_pop_norm)[::-1][:n_rec]
+            return [(int(i), float(self.item_pop_norm[i])) for i in top_idx]
 
-        if len(unrated) == 0:
-            return []
+        items_u, _ = self.get_user_items(u)
 
         if len(items_u) == 0:
-            pop_scores = self.item_pop_norm[unrated]
-            top_idx = np.argsort(pop_scores)[::-1][:n_rec]
-            return [(int(unrated[i]), float(pop_scores[i])) for i in top_idx]
+            top_idx = np.argsort(self.item_pop_norm)[::-1][:n_rec]
+            return [(int(i), float(self.item_pop_norm[i])) for i in top_idx]
 
-        preds = []
-        for i in unrated:
-            p = self.predict_score_for_ranking(u, i)
-            if p is not None:
-                preds.append((int(i), p))
+        unrated = np.setdiff1d(np.arange(self.n_items), items_u)
+        preds   = [(int(i), p) for i in unrated
+                   if (p := self.predict_score_for_ranking(u, i)) is not None]
 
         preds.sort(key=lambda x: x[1], reverse=True)
         return preds[:n_rec]
-
 
 # ======================================================================
 # Split data
 # ======================================================================
 def split_data(Y, train_ratio=0.7, valid_ratio=0.1):
-    np.random.seed(42)
+    """Chia dữ liệu theo per-user + timestamp."""
     user_items = {}
-    for u, i, r in Y:
-        user_items.setdefault(int(u), []).append((i, r))
+    for u, i, r, t in Y:
+        user_items.setdefault(int(u), []).append((i, r, t))
 
     train, valid, test = [], [], []
     for u in user_items:
-        items = user_items[u]
-        np.random.shuffle(items)
+        items = sorted(user_items[u], key=lambda x: x[2])  # sort theo timestamp
         n = len(items)
         n_train = int(train_ratio * n)
         n_valid = int(valid_ratio * n)
-        for i, r in items[:n_train]:
+        for i, r, _ in items[:n_train]:
             train.append([u, i, r])
-        for i, r in items[n_train:n_train + n_valid]:
+        for i, r, _ in items[n_train:n_train + n_valid]:
             valid.append([u, i, r])
-        for i, r in items[n_train + n_valid:]:
+        for i, r, _ in items[n_train + n_valid:]:
             test.append([u, i, r])
 
     return np.array(train), np.array(valid), np.array(test)
@@ -193,6 +229,7 @@ def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=300):
 
         negatives  = np.random.choice(negatives, n_neg, replace=False)
         candidates = list(valid_liked) + list(negatives)
+        np.random.shuffle(candidates)  # Fix tie-breaking bug
 
         preds = []
         for i in candidates:
@@ -222,7 +259,6 @@ if __name__ == "__main__":
 
     df = pd.read_csv(BASE_PATH + 'ml-100k (1)/ml-100k/u.data',
                      sep='\t', names=['u', 'i', 'r', 't'])
-    df = df.drop('t', axis=1)
     df['u'] -= 1
     df['i'] -= 1
     Y = df.values
@@ -300,7 +336,7 @@ if __name__ == "__main__":
     plt.show()
 
     # ===== FINAL MODEL =====
-    final_model = FastItemCF(Y, n_users, n_items, **best_params)
+    final_model = FastItemCF(Y[:, :3], n_users, n_items, **best_params)
     final_model.fit()
 
     with open(BASE_PATH + "fast_item_cf.pkl", "wb") as f:
