@@ -1,344 +1,316 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+from collections import defaultdict
 import matplotlib.pyplot as plt
-from scipy import sparse
-from sklearn.metrics.pairwise import cosine_similarity
 import pickle
-from google.colab import drive
 
+class FastItemCF_Scratch:
+    def __init__(self, Y_data, k=200, shrink=20, min_common=2, pop_weight=0.6,
+                 n_users=None, n_items=None):
 
-class FastItemCF:
-    def __init__(self, Y_data, n_users, n_items, k=20, shrink=20, min_common=15, pop_weight=0.0):
-        self.Y_data = Y_data
-        self.n_users = n_users
-        self.n_items = n_items
+        self.Y_data = Y_data.astype(np.float64)
         self.k = k
         self.shrink = shrink
         self.min_common = min_common
         self.pop_weight = pop_weight
 
-    def fit(self):
-        self.normalize()
-        self.similarity()
+        if n_users is None:
+            self.n_users = int(np.max(self.Y_data[:, 0])) + 1
+        else:
+            self.n_users = n_users
 
-    def normalize(self):
-        # Sort theo (item, user) → CSR by item nhất quán
-        sort_idx    = np.lexsort((self.Y_data[:, 0], self.Y_data[:, 1]))
-        self.Y_data = self.Y_data[sort_idx]
+        if n_items is None:
+            self.n_items = int(np.max(self.Y_data[:, 1])) + 1
+        else:
+            self.n_items = n_items
 
-        self.mu = np.zeros(self.n_users)
-        users   = self.Y_data[:, 0].astype(int)
+    def normalize_Y(self):
+        self.user_mean = np.zeros(self.n_users)
+
         for u in range(self.n_users):
-            ids = np.where(users == u)[0]
-            self.mu[u] = np.mean(self.Y_data[ids, 2]) if len(ids) > 0 else 0
+            idx = self.Y_data[:, 0] == u
+            if np.any(idx):
+                self.user_mean[u] = np.mean(self.Y_data[idx, 2])
 
-        rows    = self.Y_data[:, 1].astype(int)   # item là row
-        cols    = self.Y_data[:, 0].astype(int)   # user là col
-        ratings = self.Y_data[:, 2]
-        centered = ratings - self.mu[cols]
-
-        # Build CSR theo item
-        self.indptr   = np.zeros(self.n_items + 1, dtype=int)
-        for r in rows:
-            self.indptr[r + 1] += 1
-        self.indptr = np.cumsum(self.indptr)
-
-        self.indices  = np.zeros(len(cols), dtype=int)
-        self.csr_data = np.zeros(len(centered))
-
-        tracker = self.indptr[:-1].copy()
-        for idx in range(len(centered)):
-            r   = rows[idx]
-            pos = tracker[r]
-            self.indices[pos]  = cols[idx]
-            self.csr_data[pos] = centered[idx]
-            tracker[r] += 1
-
-        # item popularity (giữ nguyên)
-        item_counts        = np.bincount(rows, minlength=self.n_items)
-        self.item_pop      = np.log1p(item_counts)
+        items = self.Y_data[:, 1].astype(np.int32)
+        item_counts = np.bincount(items, minlength=self.n_items)
+        self.item_pop = np.log1p(item_counts)
         self.item_pop_norm = self.item_pop / (np.max(self.item_pop) + 1e-8)
 
-    def get_sparse_row(self, i):
-        """Trả về (user_ids, ratings_bar) của item i."""
-        start = self.indptr[i]
-        end   = self.indptr[i + 1]
-        return self.indices[start:end], self.csr_data[start:end]
-
-    def get_user_items(self, u):
-        """Trả về (item_ids, ratings_bar) mà user u đã rate."""
-        mask  = self.Y_data[:, 0].astype(int) == u
-        items = self.Y_data[mask, 1].astype(int)
-        rbar  = self.Y_data[mask, 2] - self.mu[u]
-        return items, rbar
+        self.Ybar = np.zeros((self.n_users, self.n_items))
+        for row in self.Y_data:
+            u, i, r = int(row[0]), int(row[1]), row[2]
+            self.Ybar[u, i] = r - self.user_mean[u]
 
     def similarity(self):
-        self.S = np.zeros((self.n_items, self.n_items))
+        dot_product = self.Ybar.T @ self.Ybar
 
+        norms = np.sqrt(np.sum(self.Ybar**2, axis=0))
+        norms[norms == 0] = 1e-8
+        norm_matrix = norms[:, None] @ norms[None, :]
+
+        S = dot_product / norm_matrix
+
+        binary_Y = (self.Ybar != 0).astype(np.float64)
+        co_count = binary_Y.T @ binary_Y
+
+        S = S * (co_count / (co_count + self.shrink))
+        S = S * (co_count >= self.min_common)
+
+        # Chặn Data Leakage
+        np.fill_diagonal(S, 0)
+
+        # TOP-K
         for i in range(self.n_items):
-            users_i, ratings_i = self.get_sparse_row(i)
-            if len(users_i) == 0:
-                continue
+            row = S[i]
+            if self.k < self.n_items:
+                top_k_idx = np.argsort(row)[-self.k:]
+                mask = np.zeros(self.n_items, dtype=bool)
+                mask[top_k_idx] = True
+                row[~mask] = 0
 
-            for j in range(i, self.n_items):
-                if i == j:
-                    self.S[i, j] = 1.0
-                    continue
+        self.S = S
 
-                users_j, ratings_j = self.get_sparse_row(j)
-                if len(users_j) == 0:
-                    continue
+    def fit(self):
+        self.normalize_Y()
+        self.similarity()
 
-                common, idx_i, idx_j = np.intersect1d(
-                    users_i, users_j, return_indices=True
-                )
-                if len(common) < self.min_common:
-                    continue
+    def recommend(self, u, top_k=10, exclude_rated=True):
+        rated_idx = self.Y_data[:, 0] == u
+        rated_items = self.Y_data[rated_idx, 1].astype(np.int32)
 
-                r_i   = ratings_i[idx_i]
-                r_j   = ratings_j[idx_j]
-                denom = np.sqrt(np.sum(r_i**2)) * np.sqrt(np.sum(r_j**2))
-                if denom == 0:
-                    continue
+        if exclude_rated:
+            mask = np.ones(self.n_items, dtype=bool)
+            mask[rated_items] = False
+            candidate_items = np.where(mask)[0]
+        else:
+            candidate_items = np.arange(self.n_items)
 
-                sim  = np.sum(r_i * r_j) / denom
-                sim *= len(common) / (len(common) + self.shrink)
-                sim  = max(sim, 0)
+        if len(rated_items) == 0:
+            preds = self.item_pop_norm[candidate_items]
+        else:
+            sim_matrix = self.S[candidate_items][:, rated_items]
+            rated_vals = (self.Ybar[u, rated_items] > 0).astype(float)
 
-                self.S[i, j] = self.S[j, i] = sim
+            num = np.sum(sim_matrix * rated_vals, axis=1)
+            den = np.sum(np.abs(sim_matrix), axis=1) + 10.0
 
-    def predict(self, u, i):
-        if u >= self.n_users or i >= self.n_items:
-            return None
+            preds = self.user_mean[u] + num / den + self.pop_weight * self.item_pop_norm[candidate_items]
 
-        items_u, rbar_u = self.get_user_items(u)
-        if len(items_u) == 0:
-            return None
+        if len(candidate_items) == 0:
+            return []
 
-        sims     = self.S[i, items_u]
-        top_idx  = np.argsort(sims)[::-1][:self.k]
-        top_sims = np.maximum(sims[top_idx], 0)
-        top_rbar = rbar_u[top_idx]
+        top_k_actual = min(top_k, len(candidate_items))
+        top_items_idx = np.argsort(preds)[-top_k_actual:][::-1]
 
-        denom = np.sum(np.abs(top_sims))
-        if denom == 0:
-            return None
+        return candidate_items[top_items_idx].tolist()
 
-        pred = self.mu[u] + np.sum(top_sims * top_rbar) / denom
-        return float(np.clip(pred, 1, 5))
+    def evaluate_ranking(self, data, top_k=10, threshold=4, exclude_rated=True):
+        test_dict = defaultdict(list)
+        for row in data:
+            u, i, r = int(row[0]), int(row[1]), row[2]
+            if r >= threshold:
+                test_dict[u].append(i)
 
-    def predict_score_for_ranking(self, u, i):
-        items_u, rbar_u = self.get_user_items(u)
-        if len(items_u) == 0:
-            return None
+        precisions, recalls = [], []
 
-        sims     = self.S[i, items_u]
-        top_idx  = np.argsort(sims)[::-1][:self.k]
-        top_sims = np.maximum(sims[top_idx], 0)
-        top_rbar = rbar_u[top_idx]
+        for u, relevant in test_dict.items():
+            recs = self.recommend(u, top_k, exclude_rated=exclude_rated)
+            hit = len(set(recs) & set(relevant))
 
-        denom = np.sum(np.abs(top_sims))
-        if denom == 0:
-            return None
+            precisions.append(hit / top_k)
+            recalls.append(hit / len(relevant))
 
-        pop_bias = self.pop_weight * self.item_pop_norm[i]
-        return float(self.mu[u] + np.sum(top_sims * top_rbar) / denom + pop_bias)
+        if not precisions:
+            return 0.0, 0.0
 
-    def recommend(self, u, n_rec=5):
-        if u >= self.n_users:
-            top_idx = np.argsort(self.item_pop_norm)[::-1][:n_rec]
-            return [(int(i), float(self.item_pop_norm[i])) for i in top_idx]
+        return np.mean(precisions), np.mean(recalls)
 
-        items_u, _ = self.get_user_items(u)
+    def evaluate_rmse(self, data):
+        se, cnt = 0, 0
 
-        if len(items_u) == 0:
-            top_idx = np.argsort(self.item_pop_norm)[::-1][:n_rec]
-            return [(int(i), float(self.item_pop_norm[i])) for i in top_idx]
+        for row in data:
+            u, i, r = int(row[0]), int(row[1]), row[2]
 
-        unrated = np.setdiff1d(np.arange(self.n_items), items_u)
-        preds   = [(int(i), p) for i in unrated
-                   if (p := self.predict_score_for_ranking(u, i)) is not None]
+            rated_idx = self.Y_data[:, 0] == u
+            rated_items = self.Y_data[rated_idx, 1].astype(np.int32)
 
-        preds.sort(key=lambda x: x[1], reverse=True)
-        return preds[:n_rec]
+            if len(rated_items) == 0:
+                pred = self.user_mean[u]
+            else:
+                sim = self.S[i, rated_items]
+                r_vals = self.Ybar[u, rated_items]
 
-# ======================================================================
-# Split data
-# ======================================================================
-def split_data(Y, train_ratio=0.7, valid_ratio=0.1):
-    """Chia dữ liệu theo per-user + timestamp."""
-    user_items = {}
-    for u, i, r, t in Y:
-        user_items.setdefault(int(u), []).append((i, r, t))
+                num = np.sum(sim * r_vals)
+                den = np.sum(np.abs(sim)) + 5.0
 
-    train, valid, test = [], [], []
-    for u in user_items:
-        items = sorted(user_items[u], key=lambda x: x[2])  # sort theo timestamp
-        n = len(items)
-        n_train = int(train_ratio * n)
-        n_valid = int(valid_ratio * n)
-        for i, r, _ in items[:n_train]:
-            train.append([u, i, r])
-        for i, r, _ in items[n_train:n_train + n_valid]:
-            valid.append([u, i, r])
-        for i, r, _ in items[n_train + n_valid:]:
-            test.append([u, i, r])
+                pred = self.user_mean[u] + num / den + self.pop_weight * self.item_pop_norm[i]
 
-    return np.array(train), np.array(valid), np.array(test)
+            se += (pred - r) ** 2
+            cnt += 1
+
+        return np.sqrt(se / cnt) if cnt > 0 else 0
 
 
-# ======================================================================
-# RMSE
-# ======================================================================
-def rmse(model, data):
-    se, cnt = 0, 0
-    for u, i, r in data:
-        pred = model.predict(int(u), int(i))
-        if pred is None:
-            continue
-        se  += (r - pred) ** 2
-        cnt += 1
-    return np.sqrt(se / cnt) if cnt > 0 else float('nan')
+def compute_f1(p, r):
+    return 2 * p * r / (p + r + 1e-8)
 
 
-# ======================================================================
-# Evaluate Precision & Recall
-# ======================================================================
-def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=300):
-    np.random.seed(42)
-    user_liked = {}
-    for u, i, r in data:
-        if r >= threshold:
-            user_liked.setdefault(int(u), set()).add(int(i))
+def custom_train_val_test_split(data_array, val_size=0.1, test_size=0.1, random_seed=42):
+    np.random.seed(random_seed)
+    user_records = defaultdict(list)
 
-    precisions, recalls = [], []
+    for row in data_array:
+        user_records[int(row[0])].append(row)
 
-    for u in user_liked:
-        liked       = user_liked[u]
-        items_u, _  = model.get_sparse_row(u)
-        items_u     = set(items_u.tolist())
+    train_list, val_list, test_list = [], [], []
 
-        valid_liked = liked - items_u
-        if not valid_liked:
-            continue
+    for u, records in user_records.items():
+        n = len(records)
+        np.random.shuffle(records)
 
-        all_items = set(range(n_items))
-        negatives = list(all_items - items_u - valid_liked)
-        if len(negatives) < n_neg:
-            continue
+        if n < 5:
+            train_list.extend(records)
+        else:
+            n_test = int(n * test_size)
+            n_val = int(n * val_size)
 
-        negatives  = np.random.choice(negatives, n_neg, replace=False)
-        candidates = list(valid_liked) + list(negatives)
-        np.random.shuffle(candidates)  # Fix tie-breaking bug
+            test_list.extend(records[:n_test])
+            val_list.extend(records[n_test:n_test+n_val])
+            train_list.extend(records[n_test+n_val:])
 
-        preds = []
-        for i in candidates:
-            p = model.predict_score_for_ranking(u, i)
-            if p is not None:
-                preds.append((i, p))
-
-        if not preds:
-            continue
-
-        preds.sort(key=lambda x: x[1], reverse=True)
-        top_k = set([i for i, _ in preds[:K]])
-        hits  = len(top_k & valid_liked)
-
-        precisions.append(hits / K)
-        recalls.append(hits / len(valid_liked))
-
-    return np.mean(precisions), np.mean(recalls)
+    return np.array(train_list), np.array(val_list), np.array(test_list)
 
 
-# ======================================================================
-# MAIN
-# ======================================================================
-if __name__ == "__main__":
+# ================= MAIN =================
+if __name__ == '__main__':
     drive.mount('/content/drive')
     BASE_PATH = '/content/drive/MyDrive/movielen/'
 
-    df = pd.read_csv(BASE_PATH + 'ml-100k (1)/ml-100k/u.data',
-                     sep='\t', names=['u', 'i', 'r', 't'])
-    df['u'] -= 1
-    df['i'] -= 1
-    Y = df.values
+    df = pd.read_csv(BASE_PATH + 'ml-100k (1)/ml-100k/u.data', sep='\t',
+                     names=['user_id', 'item_id', 'rating', 'timestamp'])
 
-    n_users = int(np.max(Y[:, 0])) + 1
-    n_items = int(np.max(Y[:, 1])) + 1
+    # 0-based ID giống recommendation.py
+    df['user_id'] -= 1
+    df['item_id'] -= 1
 
-    Y_train, Y_valid, Y_test = split_data(Y)
+    n_users = int(df['user_id'].max()) + 1
+    n_items = int(df['item_id'].max()) + 1
 
-    # ===== TUNING TRÊN VALID =====
-    best_val_p  = 0
-    best_params = {}
-    best_model  = None
+    data = df[['user_id', 'item_id', 'rating']].values
 
-    for k in [20, 50, 100]:
-        for shrink in [10, 25, 50]:
-            for min_common in [2, 5, 10]:
-                model = FastItemCF(Y_train, n_users, n_items,
-                                   k=k, shrink=shrink, min_common=min_common)
-                model.fit()
-                p, r = evaluate_top_k(model, Y_valid, n_items, K=10)
-                print(f"k={k}, shrink={shrink}, min_common={min_common} "
-                      f"-> P@10={p:.4f}, R@10={r:.4f}")
+    train, val, test = custom_train_val_test_split(data)
 
-                if p > best_val_p:
-                    best_val_p  = p
-                    best_params = {'k': k, 'shrink': shrink, 'min_common': min_common}
-                    best_model  = model
+    k_values = [10, 20]
+    shrink_values = [50, 100]
 
-    print(f"\nBest params: {best_params}")
+    best_score = -1
+    best_params = None
 
-    # ===== ĐÁNH GIÁ TRÊN TEST (1 lần duy nhất) =====
-    p_test, r_test = evaluate_top_k(best_model, Y_test, n_items, K=10)
-    print(f"Test P@10 : {p_test:.4f}")
-    print(f"Test R@10 : {r_test:.4f}")
+    print("\n=== GRID SEARCH LOG ===")
 
-    # ===== LEARNING CURVE: Train RMSE vs Valid RMSE =====
-    print("\nĐang vẽ learning curve (Train RMSE vs Valid RMSE)...")
+    for k in k_values:
+        for shrink in shrink_values:
+            model = FastItemCF_Scratch(train, k=k, shrink=shrink,
+                                        n_users=n_users, n_items=n_items)
+            model.fit()
 
-    train_sizes  = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
-    train_rmses  = []
-    valid_rmses  = []
+            p_val, r_val = model.evaluate_ranking(val, exclude_rated=True)
+            rmse_train = model.evaluate_rmse(train)
+            rmse_val = model.evaluate_rmse(val)
+            f1_val = compute_f1(p_val, r_val)
+
+            print(f"\n[k={k}, shrink={shrink}]")
+            print(f" Train -> RMSE={rmse_train:.4f}")
+            print(f" Val   -> P={p_val:.4f}, R={r_val:.4f}, F1={f1_val:.4f}, RMSE={rmse_val:.4f}")
+
+            if f1_val > best_score:
+                best_score = f1_val
+                best_params = {'k': k, 'shrink': shrink}
+
+    print("\n=== BEST PARAMS ===")
+    print(best_params, " | F1_val =", best_score)
+
+    # ===== ĐÁNH GIÁ TRÊN TEST =====
+    best_model = FastItemCF_Scratch(train, k=best_params['k'], shrink=best_params['shrink'],
+                                     n_users=n_users, n_items=n_items)
+    best_model.fit()
+    p_test, r_test = best_model.evaluate_ranking(test, exclude_rated=True)
+    rmse_test = best_model.evaluate_rmse(test)
+    print(f"\nTest -> P={p_test:.4f}, R={r_test:.4f}, RMSE={rmse_test:.4f}")
+
+    # ===== LEARNING CURVE =====
+    train_sizes = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
+
+    lc_p_val, lc_r_val = [], []
+    lc_rmse_tr, lc_rmse_val = [], []
+
+    print("\n=== LEARNING CURVE LOG ===")
 
     np.random.seed(42)
+    np.random.shuffle(train)
+
     for frac in train_sizes:
-        n = int(len(Y_train) * frac)
+        n = int(len(train) * frac)
+        sub_train = train[:n]
 
-        # Random sample — không cắt theo thứ tự
-        idx   = np.random.choice(len(Y_train), n, replace=False)
-        Y_sub = Y_train[idx]
+        model = FastItemCF_Scratch(
+            sub_train,
+            k=best_params['k'],
+            shrink=best_params['shrink'],
+            n_users=n_users,
+            n_items=n_items
+        )
+        model.fit()
 
-        lc_model = FastItemCF(Y_sub, n_users, n_items, **best_params)
-        lc_model.fit()
+        p_v, r_v = model.evaluate_ranking(val, exclude_rated=True)
+        rmse_tr = model.evaluate_rmse(sub_train)
+        rmse_v = model.evaluate_rmse(val)
 
-        tr = rmse(lc_model, Y_sub)    # Train RMSE
-        va = rmse(lc_model, Y_valid)  # Valid RMSE ✅ (không dùng test)
+        print(f"\n[Train size = {frac}]")
+        print(f" Train -> RMSE={rmse_tr:.4f}")
+        print(f" Val   -> P={p_v:.4f}, R={r_v:.4f}, RMSE={rmse_v:.4f}")
 
-        train_rmses.append(tr)
-        valid_rmses.append(va)
-        print(f"  Size {frac*100:.0f}%: Train RMSE={tr:.4f}, Valid RMSE={va:.4f}")
+        lc_p_val.append(p_v)
+        lc_r_val.append(r_v)
+        lc_rmse_tr.append(rmse_tr)
+        lc_rmse_val.append(rmse_v)
 
-    # ===== VẼ BIỂU ĐỒ =====
-    size_labels = [f"{int(s*100)}%" for s in train_sizes]
+    # ===== PLOT =====
+    plt.style.use('default')
+    x_labels = [f"{int(x*100)}%" for x in train_sizes]
 
-    plt.figure(figsize=(8, 5))
-    plt.plot(size_labels, train_rmses, 'o-',  label='Train RMSE')
-    plt.plot(size_labels, valid_rmses, 'o--', label='Valid RMSE')
-    plt.xlabel('Training data size')
-    plt.ylabel('RMSE')
-    plt.title('Learning Curve - Item-Based CF')
+    plt.figure(figsize=(8, 5), dpi=300)
+    plt.plot(train_sizes, lc_rmse_tr, marker='o', linestyle='-', color='#1f77b4', linewidth=1.5, label="Train RMSE")
+    plt.plot(train_sizes, lc_rmse_val, marker='o', linestyle='--', color='#ff7f0e', linewidth=1.5, label="Valid RMSE")
+    plt.title("Learning Curve - Item-Based CF", fontsize=12)
+    plt.xlabel("Training data size", fontsize=10)
+    plt.ylabel("RMSE", fontsize=10)
+    plt.xticks(train_sizes, x_labels)
+    plt.grid(True, color='#e6e6e6', linestyle='-', linewidth=1)
     plt.legend()
-    plt.grid(alpha=0.3)
     plt.tight_layout()
-    plt.savefig(BASE_PATH + 'learning_curve_item.png', dpi=150)
+    plt.savefig(BASE_PATH + 'learning_curve_rmse_item.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+    plt.figure(figsize=(8, 5), dpi=300)
+    plt.plot(train_sizes, lc_p_val, marker='o', linestyle='-', color='green', linewidth=1.5, label="Val Precision")
+    plt.plot(train_sizes, lc_r_val, marker='o', linestyle='--', color='red', linewidth=1.5, label="Val Recall")
+    plt.title("Learning Curve - Validation Ranking Metrics", fontsize=12)
+    plt.xlabel("Training data size", fontsize=10)
+    plt.ylabel("Score", fontsize=10)
+    plt.xticks(train_sizes, x_labels)
+    plt.grid(True, color='#e6e6e6', linestyle='-', linewidth=1)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(BASE_PATH + 'learning_curve_ranking_item.png', dpi=300, bbox_inches='tight')
     plt.show()
 
     # ===== FINAL MODEL =====
-    final_model = FastItemCF(Y[:, :3], n_users, n_items, **best_params)
+    final_model = FastItemCF_Scratch(data, k=best_params['k'], shrink=best_params['shrink'],
+                                      n_users=n_users, n_items=n_items)
     final_model.fit()
 
     with open(BASE_PATH + "fast_item_cf.pkl", "wb") as f:
         pickle.dump(final_model, f)
-    print("Saved fast_item_cf.pkl to Drive")
+    print(f"\nĐã lưu model. Best params: {best_params}")

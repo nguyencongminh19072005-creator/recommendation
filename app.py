@@ -4,8 +4,13 @@ from fastapi.responses import HTMLResponse
 import numpy as np
 import pickle
 import json
+import __main__
 from recommendation import UserBasedCF
-from itembased import CF
+from itembased import FastItemCF_Scratch
+
+# Hack để fix lỗi pickle không tìm thấy class khi load (do model được train trên Colab/Jupyter/Local file chính)
+__main__.UserBasedCF = UserBasedCF
+__main__.FastItemCF_Scratch = FastItemCF_Scratch
 
 app = FastAPI()
 templates = Jinja2Templates(directory="public")
@@ -23,10 +28,10 @@ with open("dataset/ml-100k (1)/ml-100k/u.item", encoding="latin-1") as f:
         movies[int(parts[0])] = parts[1]
 
 # ── Load models ───────────────────────────────────────────
-with open("usercf_model.pkl", "rb") as f:
+with open("user_based_cf.pkl", "rb") as f:
     user_model = pickle.load(f)
 
-with open("cf_model.pkl", "rb") as f:
+with open("fast_item_cf.pkl", "rb") as f:
     item_model = pickle.load(f)
 
 # ── Helpers ───────────────────────────────────────────────
@@ -74,34 +79,36 @@ def get_user_recommendations(user_id: int, n: int = 10):
         movie_id = item_id_0based + 1
         title  = movies.get(movie_id, f"Movie {movie_id}")
         poster = posters.get(movie_id)
+        
+        # Clip điểm số hiển thị trên Web nằm trong khoảng 1.0 đến 5.0
+        display_score = min(max(float(score), 1.0), 5.0) if score is not None else None
+        
         result.append({
             "title": title,
-            "score": round(float(score), 2),
+            "score": round(display_score, 2) if display_score else None,
             "poster": poster
         })
     return result, False
 
 
 def get_item_recommendations(user_id: int, n: int = 10):
-    user_id_1based = user_id + 1
-
-    # Fix: dùng max từ data thực tế
-    max_user_in_data = int(item_model.Y_data[:, 0].max())
-    if user_id_1based > max_user_in_data or user_id_1based <= 0:
+    # 🔥 FIX 1: user ngoài range (0-based)
+    if user_id >= item_model.n_users or user_id < 0:
         return get_popular_items(n), True
 
-    ids = np.where(item_model.Y_data[:, 0] == user_id_1based)[0]
+    # 🔥 FIX 2: kiểm tra user có rating nào chưa
+    ids = np.where(item_model.Y_data[:, 0] == user_id)[0]
     if len(ids) == 0:
         return get_popular_items(n), True
 
-    recs = item_model.recommend(user_id_1based)[:n]
+    recs = item_model.recommend(user_id, top_k=n, exclude_rated=True)
 
     if not recs:
         return get_popular_items(n), True
 
     result = []
-    for item_id in recs:
-        movie_id = int(item_id)
+    for item_id_0based in recs:
+        movie_id = int(item_id_0based) + 1
         title  = movies.get(movie_id, f"Movie {movie_id}")
         poster = posters.get(movie_id)
         result.append({

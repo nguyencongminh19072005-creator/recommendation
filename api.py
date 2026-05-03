@@ -15,6 +15,13 @@ with open("dataset/ml-100k (1)/ml-100k/u.item", encoding="latin-1") as f:
         title_year = parts[1]  
         if "(" in title_year:
             title = title_year[:title_year.rfind("(")].strip()
+            # Xử lý các tên phim có phẩy mạo từ ở cuối (MovieLens format)
+            if title.endswith(", The"):
+                title = "The " + title[:-5]
+            elif title.endswith(", A"):
+                title = "A " + title[:-3]
+            elif title.endswith(", An"):
+                title = "An " + title[:-4]
             year  = title_year[title_year.rfind("(")+1:title_year.rfind(")")]
         else:
             title = title_year.strip()

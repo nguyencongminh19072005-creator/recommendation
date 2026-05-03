@@ -2,8 +2,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import pickle
-from google.colab import drive
-
 
 class UserBasedCF:
     def __init__(self, Y_data, n_users, n_items, k=20, shrink=20, min_common=15):
@@ -92,7 +90,7 @@ class UserBasedCF:
 
         item_indices = np.where(self.Y_data[:, 1] == i)[0]
         if len(item_indices) == 0:
-            return None
+            return self.mu[u]
 
         users_rated_i = self.Y_data[item_indices, 0].astype(int)
         users_rated_i = users_rated_i[users_rated_i != u]
@@ -123,7 +121,7 @@ class UserBasedCF:
     def predict_score_for_ranking(self, u, i):
         item_indices = np.where(self.Y_data[:, 1] == i)[0]
         if len(item_indices) == 0:
-            return None
+            return self.mu[u]
 
         users_rated_i = self.Y_data[item_indices, 0].astype(int)
         users_rated_i = users_rated_i[users_rated_i != u]
@@ -247,11 +245,18 @@ def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=100):
 
         negatives  = np.random.choice(negatives, n_neg, replace=False)
         candidates = list(valid_liked) + list(negatives)
+        
+        # FIX: Phải shuffle (trộn) candidates để phá vỡ thứ tự mặc định!
+        # Nếu không shuffle, khi các item bị hoà điểm (cùng bằng mu[u]),
+        # hàm sort của Python (Stable Sort) sẽ giữ nguyên valid_liked ở trên cùng.
+        np.random.shuffle(candidates)
 
         preds = []
         for i in candidates:
             p = model.predict_score_for_ranking(u, i)
             if p is not None:
+                # Cộng thêm một nhiễu siêu nhỏ để break-tie ngẫu nhiên hoàn toàn
+                p += np.random.uniform(0, 1e-6)
                 preds.append((i, p))
 
         if not preds:
@@ -290,9 +295,9 @@ if __name__ == "__main__":
     best_params    = {}
     best_model     = None
 
-    for k in [10,15,20]:
-        for shrink in [5,10,20]:
-            for min_common in [2,3,5]:
+    for k in [10, 20, 30, 50]:
+        for shrink in [10, 20]:
+            for min_common in [3, 5]:
                 model = UserBasedCF(Y_train, n_users, n_items,
                                     k=k, shrink=shrink, min_common=min_common)
                 model.fit()
@@ -318,56 +323,62 @@ if __name__ == "__main__":
     print(f"Test R@10 : {r_test:.4f}")
 
     # ===== LEARNING CURVE =====
-    print("\nĐang vẽ learning curve...")
-    train_sizes       = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
-    train_rmses       = []
-    valid_rmses       = []
-    valid_precisions  = []
-    np.random.seed(42)
+    print("\n=== VẼ LEARNING CURVE (Data Size) ===")
+
+    train_sizes = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    train_rmses = []
+    valid_rmses = []
+    valid_p10s  = []
+
+    # Y_train đã mất cột t do hàm split_data, nhưng dữ liệu vẫn đang được giữ nguyên thứ tự thời gian
+    df_full = pd.DataFrame(Y_train, columns=["u", "i", "r"])  
 
     for frac in train_sizes:
-        n     = int(len(Y_train) * frac)
-        idx   = np.random.choice(len(Y_train), n, replace=False)
-        Y_sub = Y_train[idx]
-
+        print(f"Training with {frac*100:2.0f}% data...")
+        
+        # Lấy prefix theo thời gian cho từng user
+        Y_sub_list = []
+        for u, group in df_full.groupby('u'):
+            n_take = max(1, int(len(group) * frac))   # ít nhất 1 rating nếu có
+            Y_sub_list.append(group.iloc[:n_take].values)
+        
+        Y_sub = np.vstack(Y_sub_list)
+        
+        # Train model
         lc_model = UserBasedCF(Y_sub, n_users, n_items, **best_params)
         lc_model.fit()
-
-        tr    = rmse(lc_model, Y_sub)
-        va    = rmse(lc_model, Y_valid)
+        
+        # Đánh giá
+        tr_rmse = rmse(lc_model, Y_sub)
+        va_rmse = rmse(lc_model, Y_valid)
         p_val, _ = evaluate_top_k(lc_model, Y_valid, n_items, K=10)
-        p_val = 0 if np.isnan(p_val) else p_val
-
-        train_rmses.append(tr)
-        valid_rmses.append(va)
-        valid_precisions.append(p_val)
-        print(f"Size {frac*100:.0f}%: Train={tr:.4f}, Valid={va:.4f}, "
-              f"P@10={p_val:.4f}, Gap={va-tr:.4f}")
+        
+        train_rmses.append(tr_rmse)
+        valid_rmses.append(va_rmse)
+        valid_p10s.append(p_val if not np.isnan(p_val) else 0)
+        
+        print(f"  → Train RMSE: {tr_rmse:.4f} | Valid RMSE: {va_rmse:.4f} | P@10: {p_val:.4f}")
 
     # ===== VẼ BIỂU ĐỒ =====
-    size_labels = [f"{int(s*100)}%" for s in train_sizes]
+    fig, ax1 = plt.subplots(figsize=(10, 6))
 
-    plt.figure(figsize=(8, 5))
-    plt.plot(size_labels, train_rmses, 'o-',  label='Train RMSE')
-    plt.plot(size_labels, valid_rmses, 'o--', label='Valid RMSE')
-    plt.xlabel('Training data size')
-    plt.ylabel('RMSE')
-    plt.title('Learning Curve - User-Based CF')
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(BASE_PATH + 'learning_curve_user.png', dpi=150)
-    plt.show()
+    ax1.set_xlabel('Training Data Size (%)')
+    ax1.set_ylabel('RMSE', color='tab:blue')
+    ax1.plot([int(x*100) for x in train_sizes], train_rmses, 'o-', color='tab:blue', label='Train RMSE')
+    ax1.plot([int(x*100) for x in train_sizes], valid_rmses, 'o--', color='tab:orange', label='Valid RMSE')
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    ax1.legend(loc='upper left')
+    ax1.grid(alpha=0.3)
 
-    plt.figure(figsize=(8, 5))
-    plt.plot(size_labels, valid_precisions, 'o-', label='Valid Precision@10')
-    plt.xlabel('Training data size')
-    plt.ylabel('Precision@10')
-    plt.title('Learning Curve - Recommendation Quality (Precision@10)')
-    plt.legend()
-    plt.grid(alpha=0.3)
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Precision@10', color='tab:green')
+    ax2.plot([int(x*100) for x in train_sizes], valid_p10s, 's-', color='tab:green', label='Valid P@10')
+    ax2.tick_params(axis='y', labelcolor='tab:green')
+    ax2.legend(loc='upper right')
+
+    plt.title('Learning Curve - User-Based Collaborative Filtering (MovieLens 100k)')
     plt.tight_layout()
-    plt.savefig(BASE_PATH + 'learning_curve_precision.png', dpi=150)
+    plt.savefig(BASE_PATH + 'learning_curve_user_cf.png', dpi=200)
     plt.show()
 
     # ===== FINAL MODEL =====
