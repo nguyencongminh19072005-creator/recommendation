@@ -175,6 +175,9 @@ class UserBasedCF:
 
 # ========== HELPER FUNCTIONS ==========
 
+def compute_f1(p, r):
+    return 2 * p * r / (p + r + 1e-8)
+
 def top_popular(Y_data, top_n=5):
     """Trả về top phim phổ biến nhất dựa trên điểm trung bình có trọng số."""
     df = pd.DataFrame(Y_data, columns=["u", "i", "r"])
@@ -220,7 +223,7 @@ def rmse(model, data):
     return np.sqrt(se / cnt) if cnt > 0 else float('nan')
 
 
-def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=100):
+def evaluate_top_k(model, data, n_items, K=10, threshold=3.5, n_neg=100):
     np.random.seed(42)
     user_liked = {}
     for u, i, r in data:
@@ -275,10 +278,8 @@ def evaluate_top_k(model, data, n_items, K=10, threshold=4, n_neg=100):
 # ========== MAIN ==========
 
 if __name__ == "__main__":
-    drive.mount('/content/drive')
-    BASE_PATH = '/content/drive/MyDrive/movielen/'
-
-    df = pd.read_csv(BASE_PATH + 'ml-100k (1)/ml-100k/u.data',
+    
+    df = pd.read_csv('ml-100k/u.data',
                      sep='\t', names=['u', 'i', 'r', 't'])
     df['u'] -= 1
     df['i'] -= 1
@@ -291,7 +292,7 @@ if __name__ == "__main__":
     Y_train, Y_valid, Y_test = split_data(Y)
 
     # ===== TUNING =====
-    best_precision = -1
+    best_f1 = -1
     best_params    = {}
     best_model     = None
 
@@ -303,17 +304,17 @@ if __name__ == "__main__":
                 model.fit()
 
                 p_val, r_val = evaluate_top_k(model, Y_valid, n_items, K=10)
-
-                if not np.isnan(p_val) and p_val > best_precision:
-                    best_precision = p_val
+                f1_val = compute_f1(p_val, r_val)
+                print(f"k={k}, shrink={shrink}, min_com={min_common} -> P@10={p_val:.4f}, R@10={r_val:.4f}, F1={f1_val:.4f}")
+                if f1_val > best_f1:
+                    best_f1 = f1_val
                     best_params    = {'k': k, 'shrink': shrink, 'min_common': min_common}
                     best_model     = model
 
                 print(f"k={k}, shrink={shrink}, min_common={min_common} "
                       f"-> P@10={p_val:.4f}, R@10={r_val:.4f}")
 
-    print(f"\nBest params    : {best_params}")
-    print(f"Best P@10 (val): {best_precision:.4f}")
+    print(f"\nBest params : {best_params} | Best F1: {best_f1:.4f}")
 
     # ===== ĐÁNH GIÁ TRÊN TEST =====
     test_rmse      = rmse(best_model, Y_test)
@@ -321,7 +322,7 @@ if __name__ == "__main__":
     print(f"\nTest RMSE : {test_rmse:.4f}")
     print(f"Test P@10 : {p_test:.4f}")
     print(f"Test R@10 : {r_test:.4f}")
-
+    print(f"Test F1: {compute_f1(p_test, r_test):.4f}")
     # ===== LEARNING CURVE =====
     print("\n=== VẼ LEARNING CURVE (Data Size) ===")
 
@@ -378,7 +379,7 @@ if __name__ == "__main__":
 
     plt.title('Learning Curve - User-Based Collaborative Filtering (MovieLens 100k)')
     plt.tight_layout()
-    plt.savefig(BASE_PATH + 'learning_curve_user_cf.png', dpi=200)
+    plt.savefig('learning_curve_user_cf.png', dpi=200)
     plt.show()
 
     # ===== FINAL MODEL =====
@@ -412,6 +413,6 @@ if __name__ == "__main__":
         print(f"  item={item}")
 
     # ===== LƯU MODEL =====
-    with open(BASE_PATH + "user_based_cf.pkl", "wb") as f:
+    with open("user_based_cf.pkl", "wb") as f:
         pickle.dump(final_model, f)
     print(f"\nĐã lưu model. Best params: {best_params}")
