@@ -3,9 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 
-# ==========================================
-# 1. UNIFIED KNN RECOMMENDER CLASS
-# ==========================================
+
 class CFRecommender:
     def __init__(self, Y_data, n_users, n_items, k=20, shrink=20, min_common=15, mode='user'):
         self.Y_data = Y_data
@@ -135,11 +133,19 @@ class CFRecommender:
         pred = self.predict_score_for_ranking(u, i)
         if pred is None: return None
         return np.clip(pred, 1, 5)
+    def recommend(self, u, n_rec=10):
+      rated_items = set(self.Y_data[self.Y_data[:, 0] == u, 1].astype(int))
+      
+      scores = []
+      for i in range(self.n_items):
+          if i in rated_items:
+              continue
+          score = self.predict_score_for_ranking(u, i)
+          scores.append((i, score))
+      
+      scores.sort(key=lambda x: x[1], reverse=True)
+      return scores[:n_rec]
 
-
-# ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
 def compute_f1(p, r):
     return 2 * p * r / (p + r + 1e-8)
 
@@ -213,9 +219,7 @@ def evaluate_top_k(model, data, n_items, K=10, threshold=3.5, n_neg=100):
     return np.mean(precisions), np.mean(recalls)
 
 
-# ==========================================
-# 3. CHẠY CHÍNH: TUNING & LEARNING CURVE
-# ==========================================
+
 if __name__ == "__main__":
     # The line below has been added to import the `drive` module.
     from google.colab import drive
@@ -233,7 +237,6 @@ if __name__ == "__main__":
 
     Y_train, Y_valid, Y_test = split_data(Y)
 
-    # ===== HÀM TÌM BEST PARAMS CHUNG =====
     def tune_hyperparameters(mode_name):
         print(f"\n--- Bắt đầu Tuning cho {mode_name.upper()}-BASED ---")
         best_f1 = -1
@@ -260,11 +263,9 @@ if __name__ == "__main__":
         print(f"==> Best params cho {mode_name.upper()}: {best_params} (F1={best_f1:.4f})")
         return best_params
 
-    # 2. CHẠY TUNING
     best_params_user = tune_hyperparameters('user')
     best_params_item = tune_hyperparameters('item')
 
-    # Đánh giá Test Set với Best Params
     print("\n--- ĐÁNH GIÁ TRÊN TẬP TEST ---")
 
     # Test User-Based
@@ -282,7 +283,6 @@ if __name__ == "__main__":
           f"| P@10: {p_test_i:.4f} | R@10: {r_test_i:.4f} | F1: {compute_f1(p_test_i, r_test_i):.4f}")
 
 
-    # 3. VẼ LEARNING CURVE VỚI BEST PARAMS
     print("\n--- VẼ LEARNING CURVE ---")
     train_sizes = [0.2, 0.4, 0.6, 0.8, 1.0]
 
@@ -314,31 +314,6 @@ if __name__ == "__main__":
         p_val_i, _ = evaluate_top_k(model_i, Y_valid, n_items, K=10)
         item_p10s.append(p_val_i)
 
-    # 4. VẼ BIỂU ĐỒ
-    x_axis = [int(x * 100) for x in train_sizes]
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-    ax1.plot(x_axis, user_rmses, 'o-', color='tab:blue', label='User-Based')
-    ax1.plot(x_axis, item_rmses, 's--', color='tab:orange', label='Item-Based')
-    ax1.set_title('Validation RMSE (Càng thấp càng tốt)')
-    ax1.set_xlabel('Training Data Size (%)')
-    ax1.set_ylabel('RMSE')
-    ax1.legend()
-    ax1.grid(alpha=0.3)
-
-    ax2.plot(x_axis, user_p10s, 'o-', color='tab:green', label='User-Based')
-    ax2.plot(x_axis, item_p10s, 's--', color='tab:red', label='Item-Based')
-    ax2.set_title('Validation Precision@10 (Càng cao càng tốt)')
-    ax2.set_xlabel('Training Data Size (%)')
-    ax2.set_ylabel('P@10')
-    ax2.legend()
-    ax2.grid(alpha=0.3)
-
-    plt.suptitle('So sánh User-Based vs Item-Based (Đã dùng Best Params)', fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig('learning_curve_tuned.png', dpi=200)
-    plt.show()
     print("\n--- LƯU MODEL XUỐNG DRIVE ---")
     model_path = BASE_PATH + "recommender_models.pkl"
     with open(model_path, "wb") as f:
@@ -349,4 +324,4 @@ if __name__ == "__main__":
             'best_params_item': best_params_item
         }, f)
     
-    print(f"✅ Đã lưu toàn bộ Model và Best Params tại: {model_path}")
+    print(f"Đã lưu toàn bộ Model và Best Params tại: {model_path}")

@@ -15,7 +15,6 @@ with open("dataset/ml-100k (1)/ml-100k/u.item", encoding="latin-1") as f:
         title_year = parts[1]  
         if "(" in title_year:
             title = title_year[:title_year.rfind("(")].strip()
-            # Xử lý các tên phim có phẩy mạo từ ở cuối (MovieLens format)
             if title.endswith(", The"):
                 title = "The " + title[:-5]
             elif title.endswith(", A"):
@@ -56,7 +55,6 @@ for movie_id, info in movies.items():
     if movie_id % 100 == 0:
         print(f"Done {movie_id}/1682")
 
-# Lưu ra file json
 with open("posters.json", "w") as f:
     json.dump(posters, f)
 

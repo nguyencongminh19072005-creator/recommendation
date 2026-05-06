@@ -20,8 +20,7 @@
           class="bg-gray-900 rounded-xl p-6 flex flex-wrap gap-4 items-end border border-gray-800">
 
       <div class="flex flex-col gap-1">
-        <label class="text-sm text-gray-400">User ID </label>
-
+        <label class="text-sm text-gray-400">User ID</label>
         <input type="number" name="user_id" min="0"
                value="{{ user_id if user_id is defined else 0 }}"
                class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 w-36
@@ -41,9 +40,9 @@
         <select name="method"
                 class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2
                        focus:outline-none focus:ring-2 focus:ring-indigo-500">
-          <option value="both"  {% if method is defined and method == 'both'  %}selected{% endif %}>cả 2</option>
-          <option value="user"  {% if method is defined and method == 'user'  %}selected{% endif %}>User-Based CF</option>
-          <option value="item"  {% if method is defined and method == 'item'  %}selected{% endif %}>Item-Based CF</option>
+          <option value="both" {% if method is defined and method == 'both' %}selected{% endif %}>Cả 2</option>
+          <option value="user" {% if method is defined and method == 'user' %}selected{% endif %}>User-Based CF</option>
+          <option value="item" {% if method is defined and method == 'item' %}selected{% endif %}>Item-Based CF</option>
         </select>
       </div>
 
@@ -74,7 +73,7 @@
               {% endif %}
               <div class="flex-1 min-w-0">
                 <p class="text-sm text-gray-300 truncate">{{ h.title }}</p>
-                <p class="text-yellow-400 text-xs font-bold">{{ h.rating }}⭐</p>
+                <p class="text-yellow-400 text-xs font-bold">{{ h.rating }} ⭐</p>
               </div>
             </div>
           {% endfor %}
@@ -89,7 +88,7 @@
       <div class="bg-gray-900 rounded-xl border border-indigo-800 p-5">
         <h2 class="text-lg font-semibold text-indigo-400 mb-1">👥 User-Based CF</h2>
         {% if user_cold %}
-          <p class="text-xs text-orange-400 mb-3">phim phổ biến nhất</p>
+          <p class="text-xs text-orange-400 mb-3">⚠️ Cold start — hiển thị phim phổ biến nhất</p>
         {% else %}
           <p class="text-xs text-gray-500 mb-3">Gợi ý dựa trên users tương đồng</p>
         {% endif %}
@@ -104,7 +103,7 @@
               {% endif %}
               <div class="flex-1 min-w-0">
                 <p class="text-sm text-gray-300 truncate">{{ rec.title }}</p>
-                <p class="text-indigo-400 text-xs font-bold">{{ rec.score }}⭐</p>
+                <p class="text-indigo-400 text-xs font-bold">{{ rec.score }} ⭐</p>
               </div>
             </div>
           {% endfor %}
@@ -120,7 +119,7 @@
       <div class="bg-gray-900 rounded-xl border border-green-800 p-5">
         <h2 class="text-lg font-semibold text-green-400 mb-1">🎬 Item-Based CF</h2>
         {% if item_cold %}
-          <p class="text-xs text-orange-400 mb-3">phim phổ biến nhất</p>
+          <p class="text-xs text-orange-400 mb-3">⚠️ Cold start — hiển thị phim phổ biến nhất</p>
         {% else %}
           <p class="text-xs text-gray-500 mb-3">Gợi ý dựa trên items tương đồng</p>
         {% endif %}
@@ -135,8 +134,10 @@
               {% endif %}
               <div class="flex-1 min-w-0">
                 <p class="text-sm text-gray-300 truncate">{{ rec.title }}</p>
-                {% if rec.score %}
-                  <p class="text-green-400 text-xs font-bold">{{ rec.score }}⭐</p>
+                {% if not item_cold %}
+                  <p class="text-green-400 text-xs font-bold">Độ tương đồng: {{ rec.score }}</p>
+                {% else %}
+                  <p class="text-green-400 text-xs font-bold">{{ rec.score }} ⭐</p>
                 {% endif %}
               </div>
             </div>
