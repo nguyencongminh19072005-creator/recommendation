@@ -82,11 +82,7 @@ def get_user_history(user_id: int, n: int = 10):
 
 
 def get_user_recommendations(user_id: int, n: int = 10):
-    """
-    - User không tồn tại hoặc chưa có rating → global popular.
-    - Có rating nhưng không tìm được neighbor (do min_common) → global popular.
-    - Còn lại → User-based CF.
-    """
+   
     if not (0 <= user_id < user_model.n_users):
         return get_popular_items(n), True
 

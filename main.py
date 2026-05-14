@@ -221,12 +221,10 @@ def evaluate_top_k(model, data, n_items, K=10, threshold=3.5, n_neg=100):
 
 
 if __name__ == "__main__":
-    # The line below has been added to import the `drive` module.
     from google.colab import drive
     drive.mount('/content/drive')
     BASE_PATH = '/content/drive/MyDrive/movielen/'
 
-    print("1. Đang tải và chia dữ liệu...")
     df = pd.read_csv(BASE_PATH + 'ml-100k (1)/ml-100k/u.data', sep='\t', names=['u', 'i', 'r', 't'])
     df['u'] -= 1
     df['i'] -= 1
@@ -242,7 +240,6 @@ if __name__ == "__main__":
         best_f1 = -1
         best_params = {}
 
-        # Có thể giảm list này lại nếu bạn test chạy quá lâu
         for k in [10, 20, 30, 50]:
             for shrink in [10, 20]:
                 for min_common in [3, 5]:
@@ -266,16 +263,13 @@ if __name__ == "__main__":
     best_params_user = tune_hyperparameters('user')
     best_params_item = tune_hyperparameters('item')
 
-    print("\n--- ĐÁNH GIÁ TRÊN TẬP TEST ---")
 
-    # Test User-Based
     final_user_model = CFRecommender(Y_train, n_users, n_items, mode='user', **best_params_user)
     final_user_model.fit()
     p_test_u, r_test_u = evaluate_top_k(final_user_model, Y_test, n_items, K=10)
     print(f"USER-BASED | Test RMSE: {rmse(final_user_model, Y_test):.4f} "
           f"| P@10: {p_test_u:.4f} | R@10: {r_test_u:.4f} | F1: {compute_f1(p_test_u, r_test_u):.4f}")
 
-    # Test Item-Based
     final_item_model = CFRecommender(Y_train, n_users, n_items, mode='item', **best_params_item)
     final_item_model.fit()
     p_test_i, r_test_i = evaluate_top_k(final_item_model, Y_test, n_items, K=10)
@@ -283,7 +277,6 @@ if __name__ == "__main__":
           f"| P@10: {p_test_i:.4f} | R@10: {r_test_i:.4f} | F1: {compute_f1(p_test_i, r_test_i):.4f}")
 
 
-    print("\n--- VẼ LEARNING CURVE ---")
     train_sizes = [0.2, 0.4, 0.6, 0.8, 1.0]
 
     user_rmses, user_p10s = [], []
@@ -314,7 +307,7 @@ if __name__ == "__main__":
         p_val_i, _ = evaluate_top_k(model_i, Y_valid, n_items, K=10)
         item_p10s.append(p_val_i)
 
-    print("\n--- LƯU MODEL XUỐNG DRIVE ---")
+
     model_path = BASE_PATH + "recommender_models.pkl"
     with open(model_path, "wb") as f:
         pickle.dump({
